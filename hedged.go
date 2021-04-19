@@ -2,6 +2,7 @@ package hedgedhttp
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"time"
 )
@@ -61,6 +62,9 @@ func (ht *hedgedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 			runInPool(func() {
 				resp, err := ht.rt.RoundTrip(req)
 				if err != nil {
+					if ne, ok := err.(net.Error); ok && ne.Timeout() {
+						return // TODO
+					}
 					resultCh <- err
 				} else {
 					resultCh <- resp
