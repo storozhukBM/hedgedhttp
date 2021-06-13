@@ -2,12 +2,18 @@ package hedgedhttp
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
+	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 )
 
 const infiniteTimeout = 30 * 24 * time.Hour // domain specific infinite
@@ -274,9 +280,59 @@ type indexedResp struct {
 	Resp  *http.Response
 }
 
+type localRequest struct {
+	Method           string
+	URL              *url.URL
+	Proto            string // "HTTP/1.0"
+	ProtoMajor       int    // 1
+	ProtoMinor       int    // 0
+	Header           http.Header
+	Body             io.ReadCloser
+	GetBody          func() (io.ReadCloser, error)
+	ContentLength    int64
+	TransferEncoding []string
+	Close            bool
+	Host             string
+	Form             url.Values
+	PostForm         url.Values
+	MultipartForm    *multipart.Form
+	Trailer          http.Header
+	RemoteAddr       string
+	RequestURI       string
+	TLS              *tls.ConnectionState
+	Cancel           <-chan struct{}
+	Response         *http.Response
+	Ctx              context.Context
+}
+
+var requestsPool = sync.Pool{New: func() interface{} {
+	return &localRequest{}
+}}
+
+func getRequestFromPool() *localRequest {
+	request := requestsPool.Get().(*localRequest)
+	return request
+}
+
+func returnRequestOnFinalize(request *localRequest) {
+	runtime.SetFinalizer(request, func(r *localRequest) {
+		zeroReq := localRequest{}
+		*r = zeroReq
+		requestsPool.Put(r)
+	})
+}
+
 func reqWithCtx(r *http.Request, ctx context.Context) (*http.Request, func()) {
 	ctx, cancel := context.WithCancel(ctx)
-	req := r.WithContext(ctx)
+
+	requestFromPool := getRequestFromPool()
+	defer returnRequestOnFinalize(requestFromPool)
+
+	targetReqAsLocal := (*localRequest)(unsafe.Pointer(r))
+	*requestFromPool = *targetReqAsLocal
+	requestFromPool.Ctx = ctx
+	req := (*http.Request)(unsafe.Pointer(requestFromPool))
+
 	return req, cancel
 }
 
